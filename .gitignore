@@ -1,0 +1,42 @@
+# ---- Python ----
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pdb
+*.egg-info/
+*.log
+
+# ---- Virtual Environment ----
+env/
+venv/
+ENV/
+.venv/
+
+# ---- Streamlit ----
+.streamlit/secrets.toml
+.streamlit/*.credential.json
+.streamlit/*.ini
+
+# ---- OS / Editor Files ----
+.DS_Store
+Thumbs.db
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# ---- Git ----
+.git/
+
+# ---- Model / Large Files (Optional) ----
+models/
+
+# ---- Compiled ----
+*.so
+
+# ---- Jupyter ----
+.ipynb_checkpoints/
+
+# ---- Cache ----
+.cache/
