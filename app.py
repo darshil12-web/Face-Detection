@@ -10,8 +10,7 @@ import sqlite3
 import uuid
 from datetime import datetime
 import json
-from db import init_db
-
+from db import init_db # Import the database initialization script
 
 # Initialize database
 conn = init_db()
@@ -21,7 +20,7 @@ conn = init_db()
 if "current_session_id" not in st.session_state:
     st.session_state.current_session_id = None
 if "MATCH_THRESHOLD" not in st.session_state:
-    st.session_state.MATCH_THRESHOLD = 0.50
+    st.session_state.MATCH_THRESHOLD = 0.50 # Default value
 if "comparison_files" not in st.session_state:
     st.session_state.comparison_files = []
 if "target_person_encoding" not in st.session_state:
@@ -36,6 +35,9 @@ if "shareable_link" not in st.session_state:
     st.session_state.shareable_link = None
 if "session_loaded_from_url" not in st.session_state:
     st.session_state.session_loaded_from_url = False
+if "processed_files" not in st.session_state:
+    st.session_state.processed_files = set()
+
 
 st.set_page_config(page_title="Face Finder: Camera Detection", layout="wide")
 st.title("Face Finder")
@@ -55,6 +57,8 @@ def save_photos_to_db(session_id, uploaded_files):
     
     # Save each photo
     for file in uploaded_files:
+        # Reset file pointer to the beginning for reading
+        file.seek(0)
         file_bytes = file.getvalue()
         c.execute(
             "INSERT INTO photos (session_id, filename, file_data, uploaded_at) VALUES (?, ?, ?, ?)",
@@ -89,51 +93,74 @@ def save_match_to_db(session_id, target_face_data, target_name, matched_filename
     conn.commit()
 
 def find_matching_photos(target_encoding, comparison_files):
-    """Find the target face in the photos"""
+    """Find the target face in the photos (optimized, same matching)"""
+
     matched_files = []
     if not comparison_files:
         return matched_files
-    
+
+    processed_files = st.session_state.processed_files
+
+    # Only process NEW files (This logic might be tricky for re-runs, simplifying for full rerun)
+    # new_files = [f for f in comparison_files if f.name not in processed_files]
+    new_files = comparison_files # Check all files again on new search
+
+    if not new_files:
+        st.info("All photos already checked.")
+        return matched_files
+
     progress_bar = st.progress(0)
     status_text = st.empty()
     current_threshold = st.session_state.MATCH_THRESHOLD
+
+    status_text.text(f"Checking {len(new_files)} photos with threshold {current_threshold}...")
+
+    # Reset processed_files for a fresh search run
+    st.session_state.processed_files = set()
     
-    for i, file in enumerate(comparison_files):
-        status_text.text(f"Checking photo {i+1}/{len(comparison_files)}...")
+    for i, file in enumerate(new_files):
         try:
-            # Reset file pointer
+            # IMPORTANT: Reset file pointer to read from start
             file.seek(0)
-            image = face_recognition.load_image_file(file) 
-            
-            # Detect faces
+            image = face_recognition.load_image_file(file)
+
+            # Detect all faces in the image
             face_locations = face_recognition.face_locations(image, model="hog")
             face_encodings = face_recognition.face_encodings(image, face_locations)
-            
-            photo_matched = False
+
             if not face_encodings:
+                st.session_state.processed_files.add(file.name)
                 continue
-                
+
+            # Check each detected face against the target face
             for face_encoding in face_encodings:
-                distance = face_recognition.face_distance([target_encoding], face_encoding)[0]
+                # Calculates the face distance
+                distance = face_recognition.face_distance(
+                    [target_encoding], face_encoding
+                )[0]
+
                 if distance <= current_threshold:
-                    photo_matched = True
-                    break
-            
-            if photo_matched:
-                matched_files.append({
-                    "file": file,
-                    "filename": file.name,
-                    "faces_detected": len(face_encodings)
-                })
+                    # Match found! Append the file and break the inner loop (no need to check other faces in this photo)
+                    matched_files.append({
+                        "file": file,
+                        "filename": file.name,
+                        "faces_detected": len(face_encodings)
+                    })
+                    break 
+
+            # Mark as processed
+            st.session_state.processed_files.add(file.name)
+
         except Exception as e:
             st.warning(f"Error processing {file.name}: {str(e)}")
-            pass
-        
-        progress_bar.progress((i + 1) / len(comparison_files))
+
+        progress_bar.progress((i + 1) / len(new_files))
 
     progress_bar.empty()
     status_text.empty()
+
     return matched_files
+
 
 def create_zip_file(matched_photos):
     """Create a ZIP file of matched photos"""
@@ -152,8 +179,8 @@ def create_zip_file(matched_photos):
 
 def generate_shareable_link(session_id):
     """Generate a shareable link for the session"""
-    # Get your server's base URL
-    base_url = "http://localhost:8501"
+    # NOTE: You must replace 'http://localhost:8501' with your actual public deployment URL if running online.
+    base_url = "http://localhost:8501" 
     return f"{base_url}/?session={session_id}"
 
 # ---------------- SIDEBAR: Database and Upload ----------------
@@ -170,6 +197,8 @@ with st.sidebar:
             st.session_state.comparison_files = []
             st.session_state.shareable_link = generate_shareable_link(new_session_id)
             st.session_state.session_loaded_from_url = False
+            st.session_state.processed_files = set() # Reset processed files
+            st.session_state.matched_photos = None # Reset results
             st.rerun()
     
     with col2:
@@ -183,6 +212,8 @@ with st.sidebar:
                 st.session_state.comparison_files = photos
                 st.success(f"Loaded {len(photos)} photos from session")
                 st.session_state.shareable_link = generate_shareable_link(session_input)
+                st.session_state.matched_photos = None # Reset results
+                st.session_state.processed_files = set() # Reset processed files
                 st.rerun()
             else:
                 st.warning("No photos found for this session")
@@ -190,8 +221,6 @@ with st.sidebar:
     # Display current session info
     if st.session_state.current_session_id:
         st.info(f"**Current Session:** {st.session_state.current_session_id}")
-        # if st.session_state.shareable_link:
-            # st.code(st.session_state.shareable_link, language="text")
     
     st.markdown("---")
     
@@ -207,9 +236,12 @@ with st.sidebar:
         if st.button("Save to Database", use_container_width=True, key="save_to_db_btn"):
             with st.spinner("Saving photos to database..."):
                 saved_count = save_photos_to_db(st.session_state.current_session_id, uploaded_files)
-            st.session_state.comparison_files = uploaded_files
+            # Re-fetch from DB to get file objects that Streamlit likes for processing later
+            st.session_state.comparison_files = get_photos_from_db(st.session_state.current_session_id) 
             st.success(f"{saved_count} photos saved to database!")
             st.session_state.shareable_link = generate_shareable_link(st.session_state.current_session_id)
+            st.session_state.matched_photos = None # Reset results
+            st.session_state.processed_files = set() # Reset processed files
             st.rerun()
     
     # Display stored photos count
@@ -223,20 +255,18 @@ with st.sidebar:
         st.caption(f"Stored in database: {count} photos")
     
     
-    # Sensitivity setting
-    # st.subheader("Detection Sensitivity")
-    # st.session_state.MATCH_THRESHOLD = st.slider(
-    #     "Matching Accuracy (Lower = Stricter)",
-    #     min_value=0.30,
-    #     max_value=0.70,
-    #     value=0.50,
-    #     step=0.05,
-    #     help="Lower value = Stricter match (requires the face to look very similar)",
-    #     key="threshold_slider"
-    # )
-    # Default threshold set (no UI)
-    if "MATCH_THRESHOLD" not in st.session_state:
-        st.session_state.MATCH_THRESHOLD = 0.50
+    # --- FIX: Sensitivity setting UNCOMMENTED ---
+    st.markdown("---")
+    st.subheader("Detection Sensitivity (Problem Fix)")
+    st.session_state.MATCH_THRESHOLD = st.slider(
+        "Matching Accuracy (Lower = Stricter)",
+        min_value=0.30,
+        max_value=0.70,
+        value=st.session_state.MATCH_THRESHOLD,
+        step=0.05,
+        help="Lower value = Stricter match (requires the face to look very similar). Try raising it (e.g., to 0.60) if faces are not detected.",
+        key="threshold_slider"
+    )
     
     # Use anywhere in your code
     MATCH_THRESHOLD = st.session_state.MATCH_THRESHOLD
@@ -259,6 +289,8 @@ if not st.session_state.current_session_id:
             st.session_state.current_session_id = new_session_id
             st.session_state.shareable_link = generate_shareable_link(new_session_id)
             st.session_state.session_loaded_from_url = False
+            st.session_state.matched_photos = None # Reset results
+            st.session_state.processed_files = set() # Reset processed files
             st.rerun()
     
     with col2:
@@ -271,7 +303,7 @@ else:
         st.markdown("---")
     
     if not st.session_state.comparison_files:
-        st.warning("Please upload photos in the sidebar first to continue.")
+        st.warning("Please upload or load photos in the sidebar first to continue.")
     else:
         # --- STEP 2: Camera Capture ---
         st.header("2. Capture Target Face")
@@ -306,7 +338,7 @@ else:
                             st.session_state.target_person_encoding = face_encodings[0]
                             st.session_state.target_person_name = "Target Person"
                             
-                            st.success("Face successfully detected!")
+                            st.success(f"Face successfully detected! ({len(face_encodings)} faces found in capture)")
                             
                             # --- STEP 4: Face Search ---
                             st.markdown("---")
@@ -335,11 +367,12 @@ else:
                                 st.success(f"Results saved to database!")
                             
                         else:
-                            st.error("No face detected in the captured photo.")
+                            st.error("No face detected in the captured photo. Please try again.")
                             st.session_state.target_person_encoding = None
                             
                     except Exception as e:
                         st.error(f"Error processing photo: {str(e)}")
+                        st.exception(e) # Show detailed error in Streamlit
 
 # ---------------- 5. RESULTS SECTION ----------------
 if st.session_state.matched_photos is not None:
@@ -368,7 +401,7 @@ if st.session_state.matched_photos is not None:
             col1, col2, col3 = st.columns(3)
             
             with col1:
-                st.metric("Total Photos", len(st.session_state.comparison_files))
+                st.metric("Total Photos Checked", len(st.session_state.comparison_files))
             
             with col2:
                 st.metric("Matches Found", len(matched_photos))
@@ -400,16 +433,15 @@ if st.session_state.matched_photos is not None:
             
             with col2:
                 # Option to save results to database
-                if st.button("Save Results to Session", use_container_width=True, key="save_results_btn"):
-                    st.success("Results already saved to database!")
+                st.write("Results already saved to database.")
     
     else:
-        st.warning(f"No matches found in the photos")
+        st.warning(f"No matches found in the photos. Try increasing the Matching Accuracy (Threshold) in the sidebar.")
 
 # ---------------- SESSION HISTORY ----------------
 with st.sidebar:
     st.markdown("---")
-    # st.header("Session History")
+    # st.header("Recent Sessions")
     
     c = conn.cursor()
     # c.execute(
@@ -422,10 +454,10 @@ with st.sidebar:
             try:
                 # Try to parse the datetime
                 if isinstance(created_at, str):
-                    date_obj = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S.%f")
+                    date_obj = datetime.strptime(created_at.split('.')[0], "%Y-%m-%d %H:%M:%S") # Handle SQLite string format
                 else:
-                    date_obj = datetime.fromisoformat(str(created_at))
-                date_str = date_obj.strftime("%b %d")
+                    date_obj = datetime.fromisoformat(str(created_at).split('.')[0])
+                date_str = date_obj.strftime("%b %d %H:%M")
                 
                 # Get photo count
                 c.execute("SELECT COUNT(*) FROM photos WHERE session_id = ?", (session_id,))
@@ -435,7 +467,7 @@ with st.sidebar:
                 # Display session with quick load button
                 col1, col2 = st.columns([3, 1])
                 with col1:
-                    st.caption(f"{session_id[:6]}... • {photo_count} photos • {date_str}")
+                    st.caption(f"**{session_id}** • {photo_count} photos • {date_str}")
                 with col2:
                     if st.button("↻", key=f"load_{session_id}", help=f"Load session {session_id}"):
                         st.session_state.current_session_id = session_id
@@ -444,49 +476,19 @@ with st.sidebar:
                         if photos:
                             st.session_state.comparison_files = photos
                             st.session_state.shareable_link = generate_shareable_link(session_id)
+                            st.session_state.matched_photos = None # Reset results
+                            st.session_state.processed_files = set() # Reset processed files
                             st.rerun()
             except Exception as e:
-                st.caption(f"Session: {session_id[:6]}...")
+                st.caption(f"Error loading session: {session_id[:6]}...")
     else:
-        st.caption("No previous sessions")
-
-# ---------------- RESET ----------------
-st.markdown("---")
-# col1, col2 = st.columns(2)
-
-# with col1:
-#     if st.button("Reset Current Session", use_container_width=True, key="reset_session_btn"):
-#         st.session_state.comparison_files = []
-#         st.session_state.matched_photos = None
-#         st.session_state.target_person_encoding = None
-#         st.session_state.show_camera = False
-#         st.rerun()
-
-# with col2:
-#     if st.button("Clear All Data", use_container_width=True, type="secondary", key="clear_all_btn"):
-#         # Clear database (optional - be careful with this)
-#         c = conn.cursor()
-#         c.execute("DELETE FROM photos")
-#         c.execute("DELETE FROM sessions")
-#         c.execute("DELETE FROM matches")
-#         conn.commit()
-        
-#         # Clear session state
-#         for key in list(st.session_state.keys()):
-#             del st.session_state[key]
-        
-#         # Reset defaults
-#         st.session_state.MATCH_THRESHOLD = 0.50
-#         st.session_state.show_camera = False
-#         st.rerun()
+        st.caption("No previous sessions found.")
 
 # ---------------- URL PARAMETER HANDLING ----------------
-# Check for URL parameters (using st.experimental_get_query_params for older Streamlit versions)
+# Check for URL parameters
 try:
-    # For Streamlit >= 1.28.0
     params = st.query_params
 except AttributeError:
-    # For older Streamlit versions
     params = st.experimental_get_query_params()
 
 # Process URL parameters if any
