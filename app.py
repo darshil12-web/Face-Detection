@@ -92,41 +92,54 @@ def save_match_to_db(session_id, target_face_data, target_name, matched_filename
     )
     conn.commit()
 
+# --- OPTIMIZED FUNCTION: IMAGE RESIZING APPLIED ---
 def find_matching_photos(target_encoding, comparison_files):
-    """Find the target face in the photos (optimized, same matching)"""
+    """Find the target face in the photos (optimized with resizing for speed)"""
 
     matched_files = []
     if not comparison_files:
         return matched_files
 
-    processed_files = st.session_state.processed_files
-
-    # Only process NEW files (This logic might be tricky for re-runs, simplifying for full rerun)
-    # new_files = [f for f in comparison_files if f.name not in processed_files]
-    new_files = comparison_files # Check all files again on new search
-
+    new_files = comparison_files
+    
     if not new_files:
         st.info("All photos already checked.")
         return matched_files
 
+    start_time = time.time() # Start time measurement
+    
     progress_bar = st.progress(0)
     status_text = st.empty()
     current_threshold = st.session_state.MATCH_THRESHOLD
 
-    status_text.text(f"Checking {len(new_files)} photos with threshold {current_threshold}...")
+    status_text.text(f"Checking {len(new_files)} photos (Threshold: {current_threshold})...")
 
     # Reset processed_files for a fresh search run
     st.session_state.processed_files = set()
     
+    # Optimization Factor: Resizing by 4 reduces processing area by 16x (4*4)
+    # Higher factor = faster, but less accurate for very small/distant faces
+    RESIZE_FACTOR = 4 
+
     for i, file in enumerate(new_files):
         try:
-            # IMPORTANT: Reset file pointer to read from start
             file.seek(0)
-            image = face_recognition.load_image_file(file)
+            
+            # 1. PIL Image में लोड करें
+            pil_image = Image.open(file).convert("RGB")
+            
+            # 2. Resizing: इमेज को छोटा करें
+            small_image = pil_image.resize(
+                (pil_image.width // RESIZE_FACTOR, pil_image.height // RESIZE_FACTOR)
+            )
+            
+            # 3. face_recognition के लिए numpy array में बदलें
+            image_np = np.array(small_image) 
 
-            # Detect all faces in the image
-            face_locations = face_recognition.face_locations(image, model="hog")
-            face_encodings = face_recognition.face_encodings(image, face_locations)
+            # Detect faces using the smaller image
+            face_locations = face_recognition.face_locations(image_np, model="hog")
+            # Note: face_encodings automatically handles the smaller size
+            face_encodings = face_recognition.face_encodings(image_np, face_locations)
 
             if not face_encodings:
                 st.session_state.processed_files.add(file.name)
@@ -134,13 +147,11 @@ def find_matching_photos(target_encoding, comparison_files):
 
             # Check each detected face against the target face
             for face_encoding in face_encodings:
-                # Calculates the face distance
                 distance = face_recognition.face_distance(
                     [target_encoding], face_encoding
                 )[0]
 
                 if distance <= current_threshold:
-                    # Match found! Append the file and break the inner loop (no need to check other faces in this photo)
                     matched_files.append({
                         "file": file,
                         "filename": file.name,
@@ -148,7 +159,6 @@ def find_matching_photos(target_encoding, comparison_files):
                     })
                     break 
 
-            # Mark as processed
             st.session_state.processed_files.add(file.name)
 
         except Exception as e:
@@ -156,10 +166,14 @@ def find_matching_photos(target_encoding, comparison_files):
 
         progress_bar.progress((i + 1) / len(new_files))
 
+    end_time = time.time()
+    total_time = end_time - start_time
+    
     progress_bar.empty()
     status_text.empty()
 
     return matched_files
+# --- END OPTIMIZED FUNCTION ---
 
 
 def create_zip_file(matched_photos):
